@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import re
 import sys
@@ -41,6 +42,36 @@ def call_ollama(prompt: str, system: str = "", timeout: int = 300, model: str = 
                 continue
             raise
     raise RuntimeError("Ollama call failed after retry")
+
+
+def call_ollama_stream(prompt: str, system: str = "", timeout: int = 600, model: str = None) -> str:
+    """Streaming variant of call_ollama — keeps the connection alive chunk by chunk."""
+    mdl = model or OLLAMA_MODEL
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    resp = requests.post(
+        f"{OLLAMA_BASE}/api/chat",
+        json={"model": mdl, "messages": messages, "stream": True},
+        stream=True,
+        timeout=(10, timeout),
+    )
+    resp.raise_for_status()
+
+    chunks: list[str] = []
+    for raw in resp.iter_lines():
+        if not raw:
+            continue
+        chunk = json.loads(raw)
+        token = chunk.get("message", {}).get("content", "")
+        if token:
+            chunks.append(token)
+        if chunk.get("done"):
+            break
+
+    return "".join(chunks).strip()
 
 
 def ollama_summarise(text: str, prompt: str, model: str = None, timeout: int = 300) -> str:

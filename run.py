@@ -29,6 +29,17 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 POLL_INTERVAL = 5  # seconds
 
 
+def _print_job_box(job_id: str) -> None:
+    line1 = f"JOB ID: {job_id}"
+    line2 = "Save this in case of disconnection"
+    inner = max(len(line1), len(line2))
+    bar = "─" * (inner + 2)
+    print(f"\n┌{bar}┐")
+    print(f"│ {line1:<{inner}} │")
+    print(f"│ {line2:<{inner}} │")
+    print(f"└{bar}┘\n")
+
+
 def save_file(path: str, content: str, encoding: str) -> None:
     full_path = os.path.join(ROOT, path)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -93,11 +104,9 @@ def submit(topic: str) -> str:
         sys.exit(1)
 
     job_id = resp.json()["job_id"]
-    print(f"\n{'=' * 56}")
-    print(f"  JOB ID: {job_id}")
-    print(f"{'=' * 56}")
-    print(f"\nPolling every {POLL_INTERVAL}s — Ctrl-C to stop watching\n"
-          f"(the job keeps running on the server)\n")
+    _print_job_box(job_id)
+    print(f"Polling every {POLL_INTERVAL}s — Ctrl-C to stop watching "
+          f"(job keeps running on server)\n")
     return job_id
 
 
