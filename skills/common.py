@@ -99,27 +99,20 @@ def call_ollama_with_retry(
                 raise
 
 
-def ollama_summarise(text: str, prompt: str, model: str = None, timeout: int = 300) -> str:
+def ollama_summarise(text: str, prompt: str, model: str = None, timeout: int = 120) -> str:
+    """Single-shot summarise call — 120s timeout, no retry. Callers must handle exceptions."""
     mdl = model or OLLAMA_MODEL
-    for attempt in range(2):
-        try:
-            resp = requests.post(
-                f"{OLLAMA_BASE}/api/generate",
-                json={
-                    "model": mdl,
-                    "prompt": f"{prompt}\n\n{text[:3000]}",
-                    "stream": False,
-                },
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()["response"].strip()
-        except requests.exceptions.Timeout:
-            if attempt == 0:
-                print("  [Ollama] Summarise timed out, retrying...")
-                continue
-            raise
-    raise RuntimeError("Ollama summarise failed after retry")
+    resp = requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={
+            "model": mdl,
+            "prompt": f"{prompt}\n\n{text[:3000]}",
+            "stream": False,
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["response"].strip()
 
 
 def slugify(text: str, max_words: int = 5) -> str:

@@ -177,6 +177,12 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
     to_scrape = all_sources[:10]
     print(f"  [research] Scraping {len(to_scrape)} sources...")
 
+    _CLAIMS_PROMPT = (
+        "Extract the 3 most specific factual claims from this text. "
+        "Return only bullet points with numbers, names, and dates where present. "
+        "If there are no specific claims, return 'No specific claims.'"
+    )
+
     enriched = []
     for src in to_scrape:
         url = src["url"]
@@ -185,13 +191,11 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
             text = scrape_url_playwright(url)
 
         if text:
-            claims = ollama_summarise(
-                text,
-                "Extract the 3 most specific factual claims from this text. "
-                "Return only bullet points with numbers, names, and dates where present. "
-                "If there are no specific claims, return 'No specific claims.'",
-                model=model,
-            )
+            try:
+                claims = ollama_summarise(text[:1500], _CLAIMS_PROMPT, model=model)
+            except Exception as e:
+                print(f"  [research]   ✗ summarise failed ({type(e).__name__}), using snippet")
+                claims = src.get("snippet", "")
         else:
             claims = src.get("snippet", "")
 
@@ -211,32 +215,44 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
         for s in good
     )
 
-    framing = ollama_summarise(
-        sources_block,
-        f"Topic: {topic}\n\n"
-        "Write ONE sentence framing hypothesis — the non-obvious angle that distinguishes this "
-        "piece from the generic take. Just the sentence, no preamble.",
-        model=model,
-    )
+    try:
+        framing = ollama_summarise(
+            sources_block,
+            f"Topic: {topic}\n\n"
+            "Write ONE sentence framing hypothesis — the non-obvious angle that distinguishes this "
+            "piece from the generic take. Just the sentence, no preamble.",
+            model=model,
+        )
+    except Exception as e:
+        print(f"  [research] framing failed ({type(e).__name__}), using placeholder")
+        framing = f"The real story behind {topic} is more specific than the headline suggests."
 
     key_claims_lines = "\n".join(
         f"- {s['claims'].split(chr(10))[0][:200]} — Source: {s['title']} ({s['url']})"
         for s in good
     )
 
-    tensions = ollama_summarise(
-        sources_block,
-        "Identify any contradictions, competing claims, or unresolved tensions between these sources. "
-        "List as bullet points. If none, note the main area of uncertainty or debate.",
-        model=model,
-    )
+    try:
+        tensions = ollama_summarise(
+            sources_block,
+            "Identify any contradictions, competing claims, or unresolved tensions between these sources. "
+            "List as bullet points. If none, note the main area of uncertainty or debate.",
+            model=model,
+        )
+    except Exception as e:
+        print(f"  [research] tensions failed ({type(e).__name__}), skipping")
+        tensions = "- Analysis unavailable — see key claims above"
 
-    data_points = ollama_summarise(
-        sources_block,
-        "List ONLY specific numbers, percentages, dollar figures, dates, and named entities "
-        "from these sources. Aim for at least 8 bullet points. No vague claims.",
-        model=model,
-    )
+    try:
+        data_points = ollama_summarise(
+            sources_block,
+            "List ONLY specific numbers, percentages, dollar figures, dates, and named entities "
+            "from these sources. Aim for at least 8 bullet points. No vague claims.",
+            model=model,
+        )
+    except Exception as e:
+        print(f"  [research] data_points failed ({type(e).__name__}), skipping")
+        data_points = "- Data extraction unavailable — see key claims above"
 
     # Second search pass if fewer than 8 concrete data points found
     if _count_bullet_points(data_points) < 8:
@@ -248,13 +264,11 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
                     seen_urls.add(url)
                     text = scrape_url(url) or scrape_url_playwright(url)
                     if text:
-                        claims = ollama_summarise(
-                            text,
-                            "Extract the 3 most specific factual claims from this text. "
-                            "Return only bullet points with numbers, names, and dates where present. "
-                            "If there are no specific claims, return 'No specific claims.'",
-                            model=model,
-                        )
+                        try:
+                            claims = ollama_summarise(text[:1500], _CLAIMS_PROMPT, model=model)
+                        except Exception as e:
+                            print(f"  [research]   ✗ priority summarise failed ({type(e).__name__}), using snippet")
+                            claims = r.get("snippet", "")
                     else:
                         claims = r.get("snippet", "")
                     if claims and "No specific claims" not in claims:
@@ -265,26 +279,33 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
             f"Source: {s['title']}\nURL: {s['url']}\nClaims:\n{s['claims']}"
             for s in enriched
         )
-        data_points = ollama_summarise(
-            extended_block,
-            "List ONLY specific numbers, percentages, dollar figures, dates, and named entities. "
-            "Aim for at least 8 bullet points. No vague claims.",
-            model=model,
-        )
+        try:
+            data_points = ollama_summarise(
+                extended_block,
+                "List ONLY specific numbers, percentages, dollar figures, dates, and named entities. "
+                "Aim for at least 8 bullet points. No vague claims.",
+                model=model,
+            )
+        except Exception as e:
+            print(f"  [research] data_points re-extract failed ({type(e).__name__}), keeping previous")
         print(f"  [research] After priority pass: {_count_bullet_points(data_points)} data points")
 
-    structure = ollama_summarise(
-        sources_block,
-        f"Topic: {topic}\n\nSuggest a structure for a 1000-word blog post:\n"
-        "- Opening hook idea (one sentence — concrete observation, not a question)\n"
-        "- Core argument in one sentence (non-obvious claim)\n"
-        "- Supporting move 1 (one line)\n"
-        "- Supporting move 2 (one line)\n"
-        "- Supporting move 3 or counterargument (one line)\n"
-        "- Closing provocation (one sentence)\n"
-        "Be specific to the sources above.",
-        model=model,
-    )
+    try:
+        structure = ollama_summarise(
+            sources_block,
+            f"Topic: {topic}\n\nSuggest a structure for a 1000-word blog post:\n"
+            "- Opening hook idea (one sentence — concrete observation, not a question)\n"
+            "- Core argument in one sentence (non-obvious claim)\n"
+            "- Supporting move 1 (one line)\n"
+            "- Supporting move 2 (one line)\n"
+            "- Supporting move 3 or counterargument (one line)\n"
+            "- Closing provocation (one sentence)\n"
+            "Be specific to the sources above.",
+            model=model,
+        )
+    except Exception as e:
+        print(f"  [research] structure failed ({type(e).__name__}), skipping")
+        structure = "- Structure suggestion unavailable — draft from the key claims and framing above"
 
     brief = (
         f"# Research brief: {topic}\n"
