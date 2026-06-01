@@ -144,15 +144,35 @@ def pipeline_worker(job_id: str, topic: str, model: str) -> None:
             if attempt > 0 and notes_str:
                 brief_input = (
                     f"{brief}\n\n---\nREDRAFT NOTES:\n{notes_str}\n"
-                    "Address each issue in the new draft."
+                    "Address each issue in the new draft. "
+                    "Your previous attempt was too short. This attempt must be longer and more detailed. "
+                    "Do not summarise — expand."
                 )
 
             t0 = time.time()
             _set_skill(job, "draft")
             log({"event": "skill_start", "skill": "draft", "attempt": attempt})
             draft_text = draft_skill.run(brief_input, voice, model, slug=slug)
+            draft_wc = count_words(draft_text)
             log({"event": "skill_done", "skill": "draft",
-                 "time": round(time.time() - t0, 1), "words": count_words(draft_text)})
+                 "time": round(time.time() - t0, 1), "words": draft_wc})
+
+            if draft_wc < 800:
+                wc_msg = f"Draft too short ({draft_wc} words), retrying..."
+                print(f"  [server] {wc_msg}")
+                log({"event": "warning", "message": wc_msg})
+                t0 = time.time()
+                _set_skill(job, "draft")
+                log({"event": "skill_start", "skill": "draft", "attempt": "wc-expand"})
+                expanded_input = (
+                    brief_input
+                    + f"\n\n---\nYour previous draft was only {draft_wc} words. "
+                    "This attempt must be longer and more detailed. "
+                    "Do not summarise — expand every section with specific data, examples, and analysis."
+                )
+                draft_text = draft_skill.run(expanded_input, voice, model, slug=slug)
+                log({"event": "skill_done", "skill": "draft",
+                     "time": round(time.time() - t0, 1), "words": count_words(draft_text)})
 
             t0 = time.time()
             _set_skill(job, "proofread")

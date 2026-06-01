@@ -43,7 +43,9 @@ JSON format (use these exact keys, integer values):
   "argument_score": <0-25>,
   "research_score": <0-20>,
   "readability_score": <0-15>,
-  "notes": ["specific issue with location", "what to fix"]
+  "notes": [
+    "Each note must name the exact location and the exact fix — e.g. 'Paragraph 2 claims chip demand is rising but gives no figure — add a specific number with source', 'Opening sentence is generic — rewrite starting with a company name, date, or dollar amount', 'Conclusion only summarises what was already said — replace with a forward-looking implication or a concrete bet'. Vague notes like 'strengthen research integration' are not acceptable."
+  ]
 }"""
 
 
@@ -96,6 +98,15 @@ def run(
     date_str = today()
 
     wc = count_words(clean_text)
+
+    if wc < 800:
+        note = (
+            f"Article is {wc} words. Must be minimum 1000. "
+            "Expand every paragraph with specific data, examples, and analysis."
+        )
+        print(f"  [validate] FAIL — word count too low ({wc} words)")
+        return 0, False, note, ""
+
     wc_score = word_count_score(wc)
 
     prompt = f"Article to score (word count: {wc}):\n\n{clean_text}"

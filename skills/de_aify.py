@@ -10,7 +10,10 @@ BANNED_WORDS = (
     "game-changer, paradigm, ecosystem (unless quoting), synergy, synergies, seamless, "
     "robust, cutting-edge, groundbreaking, revolutionary, unprecedented, holistic, pivotal, "
     "it's worth noting, at its core, in essence, when it comes to, the fact that, "
-    "in conclusion, to summarise, in today's [anything], the [noun] landscape"
+    "in conclusion, to summarise, in today's [anything], the [noun] landscape, "
+    "attractive area, appealing prospect, growing need, complex computations, "
+    "rapid technological advancements, keeping pace, staying ahead, it is worth noting, "
+    "as we know, in today's world"
 )
 
 BANNED_PATTERNS = (
@@ -39,6 +42,11 @@ PRESERVE:
 - Contractions and colloquial phrasing
 - Any sentence that sounds like something a practitioner would say out loud to a peer
 
+INDUSTRY EXPERT TEST:
+For every sentence, ask: could this have been written by anyone with a general knowledge of tech?
+If yes, rewrite it so it could only have been written by someone who actually knows this industry —
+use specific company names, dollar figures, technical terms, market dynamics, named people.
+
 Return the result in this exact format with no extra text:
 
 [ARTICLE]
@@ -56,7 +64,7 @@ def run(proofed_text: str, voice_context: str, model: str, slug: str = "draft") 
 
     prompt = f"Remove AI language patterns from this article:\n\n{proofed_text}"
 
-    result = call_ollama_with_retry(prompt, system=SYSTEM, label="de-aify", model=model)
+    result = call_ollama_with_retry(prompt, system=SYSTEM, label="de-aify", model="phi3")
 
     if "[ARTICLE]" in result and "[CHANGES]" in result:
         article = result.split("[ARTICLE]")[1].split("[CHANGES]")[0].strip()

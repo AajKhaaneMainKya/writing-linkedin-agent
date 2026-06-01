@@ -109,6 +109,21 @@ def detect_topic_type(topic: str) -> str:
     return "ai"
 
 
+def _count_bullet_points(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip().startswith("-"))
+
+
+def _priority_queries(topic: str) -> list[str]:
+    return [
+        f"{topic} TechCrunch analysis report",
+        f"{topic} Reuters Bloomberg market data statistics",
+        f"{topic} a16z Sequoia investment memo thesis",
+        f"{topic} IEEE Spectrum technical research",
+        f"{topic} earnings revenue forecast analyst",
+        f"{topic} investor relations annual report figures",
+    ]
+
+
 def build_search_queries(topic: str, topic_type: str) -> list[str]:
     base = [topic, f"{topic} 2026"]
     if topic_type == "semiconductor":
@@ -219,9 +234,44 @@ def run(topic: str, voice_context: str, model: str, slug: str = None) -> str:
     data_points = ollama_summarise(
         sources_block,
         "List ONLY specific numbers, percentages, dollar figures, dates, and named entities "
-        "from these sources. Bullet points, max 8 items. No vague claims.",
+        "from these sources. Aim for at least 8 bullet points. No vague claims.",
         model=model,
     )
+
+    # Second search pass if fewer than 8 concrete data points found
+    if _count_bullet_points(data_points) < 8:
+        print(f"  [research] Only {_count_bullet_points(data_points)} data points — running priority source pass...")
+        for q in _priority_queries(topic)[:4]:
+            for r in ddg_search(q, max_results=3):
+                url = r["url"]
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    text = scrape_url(url) or scrape_url_playwright(url)
+                    if text:
+                        claims = ollama_summarise(
+                            text,
+                            "Extract the 3 most specific factual claims from this text. "
+                            "Return only bullet points with numbers, names, and dates where present. "
+                            "If there are no specific claims, return 'No specific claims.'",
+                            model=model,
+                        )
+                    else:
+                        claims = r.get("snippet", "")
+                    if claims and "No specific claims" not in claims:
+                        enriched.append({"title": r["title"], "url": url, "claims": claims})
+                        print(f"  [research] (priority)  {r['title'][:65]}")
+
+        extended_block = "\n\n".join(
+            f"Source: {s['title']}\nURL: {s['url']}\nClaims:\n{s['claims']}"
+            for s in enriched
+        )
+        data_points = ollama_summarise(
+            extended_block,
+            "List ONLY specific numbers, percentages, dollar figures, dates, and named entities. "
+            "Aim for at least 8 bullet points. No vague claims.",
+            model=model,
+        )
+        print(f"  [research] After priority pass: {_count_bullet_points(data_points)} data points")
 
     structure = ollama_summarise(
         sources_block,

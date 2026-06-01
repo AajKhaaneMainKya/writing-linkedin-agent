@@ -39,7 +39,7 @@ def run(draft_text: str, voice_context: str, model: str, slug: str = "draft") ->
 
     prompt = f"Proofread this article:\n\n{draft_text}"
 
-    result = call_ollama_with_retry(prompt, system=SYSTEM, label="proofread", model=model)
+    result = call_ollama_with_retry(prompt, system=SYSTEM, label="proofread", model="phi3")
 
     if "[ARTICLE]" in result and "[CHANGES]" in result:
         article = result.split("[ARTICLE]")[1].split("[CHANGES]")[0].strip()
