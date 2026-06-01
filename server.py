@@ -2,37 +2,27 @@
 """Server — runs on Railway.
 
 Endpoints:
-    GET  /health  — liveness check
-    POST /run     — runs the full pipeline, streams progress via Server-Sent Events
-
-SSE event schema (one JSON object per data: line):
-    {"event": "start",        "topic": str, "slug": str, "model": str}
-    {"event": "skill_start",  "skill": str, "attempt"?: int}
-    {"event": "skill_done",   "skill": str, "time": float, "words"?: int, "score"?: int, "passed"?: bool}
-    {"event": "retry",        "attempt": int, "max": int, "score": int}
-    {"event": "warning",      "message": str}
-    {"event": "file",         "path": str, "content": str, "encoding": "utf-8"|"base64"}
-    {"event": "complete",     "score": int, "blog_words": int, "linkedin_words": int,
-                               "research_file": str, "blog_file": str,
-                               "linkedin_file": str, "pdf_file": str}
-    {"event": "error",        "message": str, "detail"?: str}
+    GET  /health            — liveness check
+    POST /run               — enqueue topic, returns {"job_id": "uuid"} immediately
+    GET  /status/<job_id>   — current progress (skill running, log of completed steps)
+    GET  /result/<job_id>   — all outputs when done (text files + PDF as base64)
 
 Environment variables:
     PORT              — HTTP port (Railway sets this automatically)
-    OLLAMA_BASE_URL   — Ollama server URL (defaults to Railway-hosted instance)
+    OLLAMA_BASE_URL   — Ollama server URL
     OLLAMA_MODEL      — model name (default: mistral)
 """
 
 import base64
 import json
 import os
-import queue
 import sys
 import threading
 import time
 import traceback
+import uuid
 
-from flask import Flask, Response, request, stream_with_context
+from flask import Flask, Response, request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -60,38 +50,58 @@ import skills.export_pdf as pdf_skill
 
 app = Flask(__name__)
 
-BLOG_DIR = os.path.join(ROOT, "outputs", "blog")
-RESEARCH_DIR = os.path.join(ROOT, "outputs", "research")
-LINKEDIN_DIR = os.path.join(ROOT, "outputs", "linkedin")
-PDF_DIR = os.path.join(ROOT, "outputs", "pdf")
+# Use /data if a persistent volume is mounted there, otherwise fall back to local
+_DATA = "/data" if os.path.isdir("/data") else ROOT
+BLOG_DIR     = os.path.join(_DATA, "outputs", "blog")
+RESEARCH_DIR = os.path.join(_DATA, "outputs", "research")
+LINKEDIN_DIR = os.path.join(_DATA, "outputs", "linkedin")
+PDF_DIR      = os.path.join(_DATA, "outputs", "pdf")
 
 for _d in [BLOG_DIR, RESEARCH_DIR, LINKEDIN_DIR, PDF_DIR]:
     os.makedirs(_d, exist_ok=True)
 
+# ── Job store ─────────────────────────────────────────────────────────────────
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def sse(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
-
-
-def read_file(path: str) -> tuple[str, str]:
-    """Return (content, encoding). PDFs are base64-encoded."""
-    if path.endswith(".pdf"):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode(), "base64"
-    with open(path) as f:
-        return f.read(), "utf-8"
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
 
 
-# ── Pipeline worker (runs in a thread) ────────────────────────────────────────
+def _new_job(topic: str, model: str) -> str:
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "queued",
+            "topic": topic,
+            "model": model,
+            "slug": None,
+            "current_skill": None,
+            "log": [],
+            "result": None,
+            "error": None,
+            "detail": None,
+        }
+    return job_id
 
-def pipeline_worker(topic: str, model: str, q: queue.Queue) -> None:
-    """Runs the full pipeline and puts SSE event dicts into q.
-    Puts None as a sentinel when finished (pass or error)."""
 
-    def emit(data: dict) -> None:
-        q.put(data)
+def _log(job: dict, entry: dict) -> None:
+    with _jobs_lock:
+        job["log"].append(entry)
+
+
+def _set_skill(job: dict, skill: str | None) -> None:
+    with _jobs_lock:
+        job["current_skill"] = skill
+
+
+# ── Pipeline worker (runs in a background thread) ─────────────────────────────
+
+def pipeline_worker(job_id: str, topic: str, model: str) -> None:
+    with _jobs_lock:
+        job = _jobs[job_id]
+        job["status"] = "running"
+
+    def log(entry: dict) -> None:
+        _log(job, entry)
 
     try:
         with open(os.path.join(ROOT, "CLAUDE.md")) as f:
@@ -100,22 +110,23 @@ def pipeline_worker(topic: str, model: str, q: queue.Queue) -> None:
         date_str = today()
         slug = slugify(topic)
 
-        emit({"event": "start", "topic": topic, "slug": slug, "model": model})
+        with _jobs_lock:
+            job["slug"] = slug
+
+        log({"event": "start", "topic": topic, "slug": slug, "model": model})
 
         # ── 1. Research ───────────────────────────────────────────────────────
         t0 = time.time()
-        emit({"event": "skill_start", "skill": "research"})
+        _set_skill(job, "research")
+        log({"event": "skill_start", "skill": "research"})
         brief = research_skill.run(topic, voice, model, slug=slug)
-        research_path = os.path.join(RESEARCH_DIR, f"{date_str}-{slug}-research.md")
-        emit({
-            "event": "skill_done", "skill": "research",
-            "time": round(time.time() - t0, 1),
-            "words": count_words(brief),
-        })
-        content, enc = read_file(research_path)
-        emit({"event": "file",
-              "path": f"outputs/research/{date_str}-{slug}-research.md",
-              "content": content, "encoding": enc})
+        log({"event": "skill_done", "skill": "research",
+             "time": round(time.time() - t0, 1), "words": count_words(brief)})
+
+        research_filename = f"{date_str}-{slug}-research.md"
+        research_path = os.path.join(RESEARCH_DIR, research_filename)
+        with open(research_path, "w") as f:
+            f.write(brief)
 
         # ── 2-5. Draft → Proofread → De-AIify → Validate (with retry) ────────
         MAX_RETRIES = 2
@@ -126,8 +137,8 @@ def pipeline_worker(topic: str, model: str, q: queue.Queue) -> None:
 
         for attempt in range(MAX_RETRIES + 1):
             if attempt > 0:
-                emit({"event": "retry", "attempt": attempt,
-                      "max": MAX_RETRIES, "score": score})
+                log({"event": "retry", "attempt": attempt,
+                     "max": MAX_RETRIES, "score": score})
 
             brief_input = brief
             if attempt > 0 and notes_str:
@@ -137,97 +148,126 @@ def pipeline_worker(topic: str, model: str, q: queue.Queue) -> None:
                 )
 
             t0 = time.time()
-            emit({"event": "skill_start", "skill": "draft", "attempt": attempt})
+            _set_skill(job, "draft")
+            log({"event": "skill_start", "skill": "draft", "attempt": attempt})
             draft_text = draft_skill.run(brief_input, voice, model, slug=slug)
-            emit({"event": "skill_done", "skill": "draft",
-                  "time": round(time.time() - t0, 1),
-                  "words": count_words(draft_text)})
+            log({"event": "skill_done", "skill": "draft",
+                 "time": round(time.time() - t0, 1), "words": count_words(draft_text)})
 
             t0 = time.time()
-            emit({"event": "skill_start", "skill": "proofread"})
+            _set_skill(job, "proofread")
+            log({"event": "skill_start", "skill": "proofread"})
             proofed = proofread_skill.run(draft_text, voice, model, slug=slug)
-            emit({"event": "skill_done", "skill": "proofread",
-                  "time": round(time.time() - t0, 1),
-                  "words": count_words(proofed)})
+            log({"event": "skill_done", "skill": "proofread",
+                 "time": round(time.time() - t0, 1), "words": count_words(proofed)})
 
             t0 = time.time()
-            emit({"event": "skill_start", "skill": "de-aify"})
+            _set_skill(job, "de-aify")
+            log({"event": "skill_start", "skill": "de-aify"})
             clean_text = de_aify_skill.run(proofed, voice, model, slug=slug)
-            emit({"event": "skill_done", "skill": "de-aify",
-                  "time": round(time.time() - t0, 1),
-                  "words": count_words(clean_text)})
+            log({"event": "skill_done", "skill": "de-aify",
+                 "time": round(time.time() - t0, 1), "words": count_words(clean_text)})
 
             t0 = time.time()
-            emit({"event": "skill_start", "skill": "validate"})
+            _set_skill(job, "validate")
+            log({"event": "skill_start", "skill": "validate"})
             score, passed, notes_str, validated_text = validate_skill.run(
                 clean_text, voice, model, slug=slug
             )
-            emit({"event": "skill_done", "skill": "validate",
-                  "time": round(time.time() - t0, 1),
-                  "score": score, "passed": passed})
+            log({"event": "skill_done", "skill": "validate",
+                 "time": round(time.time() - t0, 1), "score": score, "passed": passed})
 
             if passed:
                 break
 
-        validated_path = os.path.join(BLOG_DIR, f"{date_str}-{slug}-validated.md")
         if not passed:
             validated_text = clean_text
-            with open(validated_path, "w") as f:
-                f.write(
-                    make_front_matter(slug, "validated-forced", count_words(clean_text))
-                    + clean_text
-                )
-            emit({"event": "warning",
-                  "message": (f"Validation failed after {MAX_RETRIES} retries "
-                              f"(score {score}/100). Using best attempt.")})
+            log({"event": "warning",
+                 "message": (f"Validation failed after {MAX_RETRIES} retries "
+                             f"(score {score}/100). Using best attempt.")})
 
-        content, enc = read_file(validated_path)
-        emit({"event": "file",
-              "path": f"outputs/blog/{date_str}-{slug}-validated.md",
-              "content": content, "encoding": enc})
+        blog_content = (
+            make_front_matter(slug, "validated", count_words(validated_text))
+            + validated_text
+        )
+        blog_filename = f"{date_str}-{slug}-validated.md"
+        blog_path = os.path.join(BLOG_DIR, blog_filename)
+        with open(blog_path, "w") as f:
+            f.write(blog_content)
 
         # ── 6a. LinkedIn ──────────────────────────────────────────────────────
         t0 = time.time()
-        emit({"event": "skill_start", "skill": "linkedin-distill"})
+        _set_skill(job, "linkedin-distill")
+        log({"event": "skill_start", "skill": "linkedin-distill"})
         li_post = linkedin_skill.run(validated_text, voice, model, slug=slug)
-        li_path = os.path.join(LINKEDIN_DIR, f"{date_str}-{slug}-linkedin.md")
-        emit({"event": "skill_done", "skill": "linkedin-distill",
-              "time": round(time.time() - t0, 1),
-              "words": count_words(li_post)})
-        content, enc = read_file(li_path)
-        emit({"event": "file",
-              "path": f"outputs/linkedin/{date_str}-{slug}-linkedin.md",
-              "content": content, "encoding": enc})
+        log({"event": "skill_done", "skill": "linkedin-distill",
+             "time": round(time.time() - t0, 1), "words": count_words(li_post)})
+
+        li_filename = f"{date_str}-{slug}-linkedin.md"
+        li_path = os.path.join(LINKEDIN_DIR, li_filename)
+        with open(li_path, "w") as f:
+            f.write(li_post)
 
         # ── 6b. PDF ───────────────────────────────────────────────────────────
         t0 = time.time()
-        emit({"event": "skill_start", "skill": "export-pdf"})
-        pdf_path = pdf_skill.run(validated_text, voice, model, slug=slug)
-        emit({"event": "skill_done", "skill": "export-pdf",
-              "time": round(time.time() - t0, 1)})
-        content, enc = read_file(pdf_path)
-        emit({"event": "file",
-              "path": f"outputs/pdf/{date_str}-{slug}.pdf",
-              "content": content, "encoding": enc})
+        _set_skill(job, "export-pdf")
+        log({"event": "skill_start", "skill": "export-pdf"})
+        skill_pdf_path = pdf_skill.run(validated_text, voice, model, slug=slug)
+        with open(skill_pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+        log({"event": "skill_done", "skill": "export-pdf",
+             "time": round(time.time() - t0, 1)})
 
-        # ── Done ──────────────────────────────────────────────────────────────
-        emit({
-            "event": "complete",
+        pdf_filename = f"{date_str}-{slug}.pdf"
+        pdf_path = os.path.join(PDF_DIR, pdf_filename)
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+
+        # ── Store result ──────────────────────────────────────────────────────
+        result = {
             "score": score,
             "blog_words": count_words(validated_text),
             "linkedin_words": count_words(li_post),
-            "research_file": f"outputs/research/{date_str}-{slug}-research.md",
-            "blog_file":     f"outputs/blog/{date_str}-{slug}-validated.md",
-            "linkedin_file": f"outputs/linkedin/{date_str}-{slug}-linkedin.md",
-            "pdf_file":      f"outputs/pdf/{date_str}-{slug}.pdf",
-        })
+            "files": {
+                "research": {
+                    "path": f"outputs/research/{research_filename}",
+                    "content": brief,
+                    "encoding": "utf-8",
+                },
+                "blog": {
+                    "path": f"outputs/blog/{blog_filename}",
+                    "content": blog_content,
+                    "encoding": "utf-8",
+                },
+                "linkedin": {
+                    "path": f"outputs/linkedin/{li_filename}",
+                    "content": li_post,
+                    "encoding": "utf-8",
+                },
+                "pdf": {
+                    "path": f"outputs/pdf/{pdf_filename}",
+                    "content": base64.b64encode(pdf_bytes).decode(),
+                    "encoding": "base64",
+                },
+            },
+        }
+
+        log({"event": "complete", "score": score,
+             "blog_words": count_words(validated_text),
+             "linkedin_words": count_words(li_post)})
+
+        with _jobs_lock:
+            job["status"] = "done"
+            job["current_skill"] = None
+            job["result"] = result
 
     except Exception as exc:
-        emit({"event": "error", "message": str(exc),
-              "detail": traceback.format_exc()})
-
-    finally:
-        q.put(None)  # sentinel — tells the generator to close the stream
+        with _jobs_lock:
+            job["status"] = "error"
+            job["current_skill"] = None
+            job["error"] = str(exc)
+            job["detail"] = traceback.format_exc()
+        log({"event": "error", "message": str(exc)})
 
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
@@ -245,33 +285,40 @@ def run():
         return {"error": "missing 'topic' in request body"}, 400
 
     model = body.get("model", OLLAMA_MODEL)
-    q: queue.Queue = queue.Queue()
-
+    job_id = _new_job(topic, model)
     threading.Thread(
-        target=pipeline_worker, args=(topic, model, q), daemon=True
+        target=pipeline_worker, args=(job_id, topic, model), daemon=True
     ).start()
+    return {"job_id": job_id}
 
-    def generate():
-        while True:
-            try:
-                item = q.get(timeout=600)   # 10 min max between events
-            except queue.Empty:
-                yield sse({"event": "error",
-                           "message": "Pipeline timed out between events"})
-                break
-            if item is None:
-                break
-            yield sse(item)
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+@app.route("/status/<job_id>")
+def status(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return {"error": "job not found"}, 404
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "topic": job["topic"],
+        "slug": job["slug"],
+        "model": job["model"],
+        "current_skill": job["current_skill"],
+        "log": list(job["log"]),
+        "error": job.get("error"),
+    }
+
+
+@app.route("/result/<job_id>")
+def result(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return {"error": "job not found"}, 404
+    if job["status"] != "done":
+        return {"error": f"job is {job['status']}", "status": job["status"]}, 409
+    return {"job_id": job_id, **job["result"]}
 
 
 if __name__ == "__main__":
