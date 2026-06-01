@@ -1,11 +1,6 @@
 import os
-import time
 
-from skills.common import call_ollama_stream, count_words, make_front_matter, today
-
-_DRAFT_TIMEOUT = 600  # seconds — drafting a 1000-word piece takes longer than other steps
-_DRAFT_MAX_RETRIES = 3
-_DRAFT_RETRY_WAIT = 10  # seconds between retries
+from skills.common import call_ollama_with_retry, count_words, make_front_matter, today
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT, "outputs", "blog")
@@ -52,22 +47,7 @@ def run(research_brief: str, voice_context: str, model: str, slug: str = "draft"
         "No preamble. No commentary before or after the article."
     )
 
-    draft_text = ""
-    for attempt in range(_DRAFT_MAX_RETRIES + 1):
-        label = f"attempt {attempt + 1}/{_DRAFT_MAX_RETRIES + 1}"
-        print(f"  [draft] Calling Ollama ({label}, stream=True, timeout={_DRAFT_TIMEOUT}s)...")
-        try:
-            draft_text = call_ollama_stream(
-                research_brief, system=system, timeout=_DRAFT_TIMEOUT, model=model
-            )
-            break
-        except Exception as exc:
-            if attempt < _DRAFT_MAX_RETRIES:
-                print(f"  [draft] {label} failed: {exc}. Retrying in {_DRAFT_RETRY_WAIT}s...")
-                time.sleep(_DRAFT_RETRY_WAIT)
-            else:
-                print(f"  [draft] All {_DRAFT_MAX_RETRIES + 1} attempts failed.")
-                raise
+    draft_text = call_ollama_with_retry(research_brief, system=system, label="draft", model=model)
 
     wc = count_words(draft_text)
     fm = make_front_matter(slug, "draft", wc)

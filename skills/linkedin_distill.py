@@ -1,6 +1,6 @@
 import os
 
-from skills.common import call_ollama, count_words, today
+from skills.common import call_ollama_with_retry, count_words, today
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT, "outputs", "linkedin")
@@ -37,8 +37,7 @@ def run(validated_text: str, voice_context: str, model: str, slug: str = "post")
 
     prompt = f"Distill this blog post into a LinkedIn post:\n\n{validated_text}"
 
-    print("  [linkedin] Calling Ollama to distill LinkedIn post...")
-    post = call_ollama(prompt, system=system, timeout=300, model=model)
+    post = call_ollama_with_retry(prompt, system=system, label="linkedin", model=model)
 
     wc = count_words(post)
     out_path = os.path.join(OUTPUT_DIR, f"{date_str}-{slug}-linkedin.md")

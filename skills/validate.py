@@ -2,7 +2,7 @@ import json
 import os
 import re
 
-from skills.common import call_ollama, count_words, make_front_matter, today
+from skills.common import call_ollama_with_retry, count_words, make_front_matter, today
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT, "outputs", "blog")
@@ -100,8 +100,7 @@ def run(
 
     prompt = f"Article to score (word count: {wc}):\n\n{clean_text}"
 
-    print("  [validate] Calling Ollama to score article...")
-    response = call_ollama(prompt, system=RUBRIC, timeout=300, model=model)
+    response = call_ollama_with_retry(prompt, system=RUBRIC, label="validate", model=model)
 
     scores = parse_scores(response)
 

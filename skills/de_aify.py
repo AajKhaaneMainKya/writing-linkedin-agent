@@ -1,6 +1,6 @@
 import os
 
-from skills.common import call_ollama, count_words, make_front_matter, today
+from skills.common import call_ollama_with_retry, count_words, make_front_matter, today
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT, "outputs", "blog")
@@ -56,8 +56,7 @@ def run(proofed_text: str, voice_context: str, model: str, slug: str = "draft") 
 
     prompt = f"Remove AI language patterns from this article:\n\n{proofed_text}"
 
-    print("  [de-aify] Calling Ollama...")
-    result = call_ollama(prompt, system=SYSTEM, timeout=300, model=model)
+    result = call_ollama_with_retry(prompt, system=SYSTEM, label="de-aify", model=model)
 
     if "[ARTICLE]" in result and "[CHANGES]" in result:
         article = result.split("[ARTICLE]")[1].split("[CHANGES]")[0].strip()

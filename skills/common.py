@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 
 import requests
 
@@ -72,6 +73,30 @@ def call_ollama_stream(prompt: str, system: str = "", timeout: int = 600, model:
             break
 
     return "".join(chunks).strip()
+
+
+def call_ollama_with_retry(
+    prompt: str,
+    system: str = "",
+    timeout: int = 600,
+    model: str = None,
+    label: str = "ollama",
+    max_retries: int = 3,
+    retry_wait: int = 10,
+) -> str:
+    """call_ollama_stream with retry. Logs each attempt with the caller's label."""
+    for attempt in range(max_retries + 1):
+        tag = f"attempt {attempt + 1}/{max_retries + 1}"
+        print(f"  [{label}] Calling Ollama ({tag}, stream=True, timeout={timeout}s)...")
+        try:
+            return call_ollama_stream(prompt, system=system, timeout=timeout, model=model)
+        except Exception as exc:
+            if attempt < max_retries:
+                print(f"  [{label}] {tag} failed: {exc}. Retrying in {retry_wait}s...")
+                time.sleep(retry_wait)
+            else:
+                print(f"  [{label}] All {max_retries + 1} attempts failed.")
+                raise
 
 
 def ollama_summarise(text: str, prompt: str, model: str = None, timeout: int = 300) -> str:
